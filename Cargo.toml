@@ -2,25 +2,14 @@
 description = "Big integer implementation for Rust"
 documentation = "https://docs.rs/num-bigint"
 homepage = "https://github.com/rust-num/num-bigint"
-keywords = [
-    "mathematics",
-    "numerics",
-    "bignum",
-]
-categories = [
-    "algorithms",
-    "data-structures",
-    "science",
-]
+keywords = ["mathematics", "numerics", "bignum"]
+categories = ["algorithms", "data-structures", "science"]
 license = "MIT OR Apache-2.0"
 name = "num-bigint"
 repository = "https://github.com/rust-num/num-bigint"
 version = "0.5.1"
 readme = "README.md"
-exclude = [
-    "/ci/*",
-    "/.github/*",
-]
+exclude = ["/ci/*", "/.github/*"]
 edition = "2021"
 rust-version = "1.60"
 
@@ -64,16 +53,12 @@ name = "shootout-pidigits"
 [dependencies.num-integer]
 version = "0.1.46"
 default-features = false
-features = [
-    "i128",
-]
+features = ["i128"]
 
 [dependencies.num-traits]
 version = "0.2.18"
 default-features = false
-features = [
-    "i128",
-]
+features = ["i128"]
 
 [dependencies.rand_0_9]
 package = "rand"
