@@ -2,14 +2,16 @@ use super::addition::{__add2, add2};
 use super::subtraction::sub2;
 use super::{biguint_from_vec, cmp_slice, BigUint, IntDigits};
 
-use crate::big_digit::{self, BigDigit, DoubleBigDigit};
+use crate::big_digit::{self, BigDigit, BigDigits, DoubleBigDigit};
 use crate::Sign::{self, Minus, NoSign, Plus};
 use crate::{BigInt, UsizePromotion};
 
 use core::cmp::Ordering;
 use core::iter::Product;
 use core::ops::{Mul, MulAssign};
-use num_traits::{CheckedMul, FromPrimitive, One, Zero};
+use num_traits::{CheckedMul, FromPrimitive, Zero};
+
+use super::ntt;
 
 #[inline]
 pub(super) fn mac_with_carry(
@@ -48,17 +50,18 @@ fn mac_digit(acc: &mut [BigDigit], b: &[BigDigit], c: BigDigit) {
     }
 
     let (carry_hi, carry_lo) = big_digit::from_doublebigdigit(carry);
+    debug_assert_eq!(carry_hi, 0, "mac_with_carry never keeps high bits");
 
-    let final_carry = if carry_hi == 0 {
-        __add2(a_hi, &[carry_lo])
-    } else {
-        __add2(a_hi, &[carry_hi, carry_lo])
-    };
+    let final_carry = __add2(a_hi, &[carry_lo]);
     assert_eq!(final_carry, 0, "carry overflow during multiplication!");
 }
 
 fn bigint_from_slice(slice: &[BigDigit]) -> BigInt {
-    BigInt::from(biguint_from_vec(slice.to_vec()))
+    let mut u = BigUint {
+        data: BigDigits::from_slice(slice),
+    };
+    u.normalize();
+    BigInt::from(u)
 }
 
 /// Three argument multiply accumulate:
@@ -92,8 +95,9 @@ fn mac3(mut acc: &mut [BigDigit], mut b: &[BigDigit], mut c: &[BigDigit]) {
     // - If y is at least least twice as long as x, split using Half-Karatsuba.
     // - Next we use Karatsuba multiplication (Toom-2), which we have optimized
     //   to avoid unnecessary allocations for intermediate values.
-    // - For the largest inputs we use Toom-3, which better optimizes the
+    // - Next we use Toom-3, which better optimizes the
     //   number of operations, but uses more temporary allocations.
+    // - For the largest inputs we use number-theoretic transform (NTT).
     //
     // The thresholds are somewhat arbitrary, chosen by evaluating the results
     // of `cargo bench --bench bigint multiply`.
@@ -233,7 +237,9 @@ fn mac3(mut acc: &mut [BigDigit], mut b: &[BigDigit], mut c: &[BigDigit]) {
         // We reuse the same BigUint for all the intermediate multiplies and have to size p
         // appropriately here: x1.len() >= x0.len and y1.len() >= y0.len():
         let len = x1.len() + y1.len() + 1;
-        let mut p = BigUint { data: vec![0; len] };
+        let mut p = BigUint {
+            data: BigDigits::from_vec(vec![0; len]),
+        };
 
         // p2 = x1 * y1
         mac3(&mut p.data, x1, y1);
@@ -245,7 +251,7 @@ fn mac3(mut acc: &mut [BigDigit], mut b: &[BigDigit], mut c: &[BigDigit]) {
         add2(&mut acc[b * 2..], &p.data);
 
         // Zero out p before the next multiply:
-        p.data.truncate(0);
+        p.data.clear();
         p.data.resize(len, 0);
 
         // p0 = x0 * y0
@@ -262,7 +268,7 @@ fn mac3(mut acc: &mut [BigDigit], mut b: &[BigDigit], mut c: &[BigDigit]) {
 
         match j0_sign * j1_sign {
             Plus => {
-                p.data.truncate(0);
+                p.data.clear();
                 p.data.resize(len, 0);
 
                 mac3(&mut p.data, &j0.data, &j1.data);
@@ -275,7 +281,7 @@ fn mac3(mut acc: &mut [BigDigit], mut b: &[BigDigit], mut c: &[BigDigit]) {
             }
             NoSign => (),
         }
-    } else {
+    } else if x.len() <= 512 {
         // Toom-3 multiplication:
         //
         // Toom-3 is like Karatsuba above, but dividing the inputs into three parts.
@@ -404,15 +410,26 @@ fn mac3(mut acc: &mut [BigDigit], mut b: &[BigDigit], mut c: &[BigDigit]) {
                 NoSign => {}
             }
         }
+    } else {
+        // Number-theoretic transform (NTT) multiplication:
+        //
+        // NTT multiplies two integers by computing the convolution of the arrays
+        // modulo a prime. Since the result may exceed the prime, we use two or three
+        // distinct primes and combine the results using the Chinese Remainder
+        // Theorem (CRT).
+        ntt::mac3(acc, b, c);
     }
 }
 
 fn mul3(x: &[BigDigit], y: &[BigDigit]) -> BigUint {
     let len = x.len() + y.len() + 1;
-    let mut prod = BigUint { data: vec![0; len] };
+    let mut prod = BigUint {
+        data: BigDigits::from_vec(vec![0; len]),
+    };
 
     mac3(&mut prod.data, x, y);
-    prod.normalized()
+    prod.normalize();
+    prod
 }
 
 fn scalar_mul(a: &mut BigUint, b: BigDigit) {

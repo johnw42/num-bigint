@@ -1,4 +1,4 @@
-use crate::big_digit::{self, BigDigit};
+use crate::big_digit::{self, BigDigit, BigDigits};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -10,8 +10,9 @@ use core::hash;
 use core::mem;
 use core::str;
 
-use num_integer::{Integer, Roots};
-use num_traits::{ConstZero, Num, One, Pow, ToPrimitive, Unsigned, Zero};
+use num_integer::Integer;
+use num_traits::bounds::LowerBounded;
+use num_traits::{ConstZero, Num, One, Pow, PrimInt, ToPrimitive, Unsigned, Zero};
 
 mod addition;
 mod division;
@@ -23,16 +24,29 @@ mod bits;
 mod convert;
 mod iter;
 mod monty;
+mod ntt;
 mod power;
+mod roots;
 mod serde;
 mod shift;
 
 pub(crate) use self::convert::to_str_radix_reversed;
 pub use self::iter::{U32Digits, U64Digits};
 
+/// Find last set bit
+/// fls(0) == 0, fls(u32::MAX) == 32
+fn fls<T: PrimInt>(v: T) -> u8 {
+    mem::size_of::<T>() as u8 * 8 - v.leading_zeros() as u8
+}
+
+// TODO(MSRV 1.67): change callers to inherent `ilog2` instead
+fn ilog2<T: PrimInt>(v: T) -> u8 {
+    fls(v) - 1
+}
+
 /// A big unsigned integer type.
 pub struct BigUint {
-    data: Vec<BigDigit>,
+    data: BigDigits,
 }
 
 // Note: derived `Clone` doesn't specialize `clone_from`,
@@ -54,7 +68,7 @@ impl Clone for BigUint {
 impl hash::Hash for BigUint {
     #[inline]
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        debug_assert!(self.data.last() != Some(&0));
+        debug_assert!(self.data.is_normal());
         self.data.hash(state);
     }
 }
@@ -62,9 +76,9 @@ impl hash::Hash for BigUint {
 impl PartialEq for BigUint {
     #[inline]
     fn eq(&self, other: &BigUint) -> bool {
-        debug_assert!(self.data.last() != Some(&0));
-        debug_assert!(other.data.last() != Some(&0));
-        self.data == other.data
+        debug_assert!(self.data.is_normal());
+        debug_assert!(other.data.is_normal());
+        *self.data == *other.data
     }
 }
 impl Eq for BigUint {}
@@ -79,15 +93,14 @@ impl PartialOrd for BigUint {
 impl Ord for BigUint {
     #[inline]
     fn cmp(&self, other: &BigUint) -> Ordering {
-        cmp_slice(&self.data[..], &other.data[..])
+        debug_assert!(self.data.is_normal());
+        debug_assert!(other.data.is_normal());
+        cmp_slice(&self.data, &other.data)
     }
 }
 
 #[inline]
 fn cmp_slice(a: &[BigDigit], b: &[BigDigit]) -> Ordering {
-    debug_assert!(a.last() != Some(&0));
-    debug_assert!(b.last() != Some(&0));
-
     match Ord::cmp(&a.len(), &b.len()) {
         Ordering::Equal => Iterator::cmp(a.iter().rev(), b.iter().rev()),
         other => other,
@@ -158,13 +171,19 @@ impl Zero for BigUint {
 
 impl ConstZero for BigUint {
     // forward to the inherent const
-    const ZERO: Self = Self::ZERO; // BigUint { data: Vec::new() };
+    const ZERO: Self = Self::ZERO;
+}
+
+impl LowerBounded for BigUint {
+    fn min_value() -> Self {
+        Self::ZERO
+    }
 }
 
 impl One for BigUint {
     #[inline]
     fn one() -> BigUint {
-        BigUint { data: vec![1] }
+        Self::ONE
     }
 
     #[inline]
@@ -175,8 +194,13 @@ impl One for BigUint {
 
     #[inline]
     fn is_one(&self) -> bool {
-        self.data[..] == [1]
+        *self.data == [1]
     }
+}
+
+impl num_traits::ConstOne for BigUint {
+    // forward to the inherent const
+    const ONE: Self = Self::ONE;
 }
 
 impl Unsigned for BigUint {}
@@ -215,8 +239,6 @@ impl Integer for BigUint {
     }
 
     /// Calculates the Greatest Common Divisor (GCD) of the number and `other`.
-    ///
-    /// The result is always positive.
     #[inline]
     fn gcd(&self, other: &Self) -> Self {
         #[inline]
@@ -331,188 +353,6 @@ impl Integer for BigUint {
     }
 }
 
-#[inline]
-fn fixpoint<F>(mut x: BigUint, max_bits: u64, f: F) -> BigUint
-where
-    F: Fn(&BigUint) -> BigUint,
-{
-    let mut xn = f(&x);
-
-    // If the value increased, then the initial guess must have been low.
-    // Repeat until we reverse course.
-    while x < xn {
-        // Sometimes an increase will go way too far, especially with large
-        // powers, and then take a long time to walk back.  We know an upper
-        // bound based on bit size, so saturate on that.
-        x = if xn.bits() > max_bits {
-            BigUint::one() << max_bits
-        } else {
-            xn
-        };
-        xn = f(&x);
-    }
-
-    // Now keep repeating while the estimate is decreasing.
-    while x > xn {
-        x = xn;
-        xn = f(&x);
-    }
-    x
-}
-
-impl Roots for BigUint {
-    // nth_root, sqrt and cbrt use Newton's method to compute
-    // principal root of a given degree for a given integer.
-
-    // Reference:
-    // Brent & Zimmermann, Modern Computer Arithmetic, v0.5.9, Algorithm 1.14
-    fn nth_root(&self, n: u32) -> Self {
-        assert!(n > 0, "root degree n must be at least 1");
-
-        if self.is_zero() || self.is_one() {
-            return self.clone();
-        }
-
-        match n {
-            // Optimize for small n
-            1 => return self.clone(),
-            2 => return self.sqrt(),
-            3 => return self.cbrt(),
-            _ => (),
-        }
-
-        // The root of non-zero values less than 2ⁿ can only be 1.
-        let bits = self.bits();
-        let n64 = u64::from(n);
-        if bits <= n64 {
-            return BigUint::one();
-        }
-
-        // If we fit in `u64`, compute the root that way.
-        if let Some(x) = self.to_u64() {
-            return x.nth_root(n).into();
-        }
-
-        let max_bits = bits / n64 + 1;
-
-        #[cfg(feature = "std")]
-        let guess = match self.to_f64() {
-            Some(f) if f.is_finite() => {
-                use num_traits::FromPrimitive;
-
-                // We fit in `f64` (lossy), so get a better initial guess from that.
-                BigUint::from_f64((f.ln() / f64::from(n)).exp()).unwrap()
-            }
-            _ => {
-                // Try to guess by scaling down such that it does fit in `f64`.
-                // With some (x * 2ⁿᵏ), its nth root ≈ (ⁿ√x * 2ᵏ)
-                let extra_bits = bits - (f64::MAX_EXP as u64 - 1);
-                let root_scale = Integer::div_ceil(&extra_bits, &n64);
-                let scale = root_scale * n64;
-                if scale < bits && bits - scale > n64 {
-                    (self >> scale).nth_root(n) << root_scale
-                } else {
-                    BigUint::one() << max_bits
-                }
-            }
-        };
-
-        #[cfg(not(feature = "std"))]
-        let guess = BigUint::one() << max_bits;
-
-        let n_min_1 = n - 1;
-        fixpoint(guess, max_bits, move |s| {
-            let q = self / s.pow(n_min_1);
-            let t = n_min_1 * s + q;
-            t / n
-        })
-    }
-
-    // Reference:
-    // Brent & Zimmermann, Modern Computer Arithmetic, v0.5.9, Algorithm 1.13
-    fn sqrt(&self) -> Self {
-        if self.is_zero() || self.is_one() {
-            return self.clone();
-        }
-
-        // If we fit in `u64`, compute the root that way.
-        if let Some(x) = self.to_u64() {
-            return x.sqrt().into();
-        }
-
-        let bits = self.bits();
-        let max_bits = bits / 2 + 1;
-
-        #[cfg(feature = "std")]
-        let guess = match self.to_f64() {
-            Some(f) if f.is_finite() => {
-                use num_traits::FromPrimitive;
-
-                // We fit in `f64` (lossy), so get a better initial guess from that.
-                BigUint::from_f64(f.sqrt()).unwrap()
-            }
-            _ => {
-                // Try to guess by scaling down such that it does fit in `f64`.
-                // With some (x * 2²ᵏ), its sqrt ≈ (√x * 2ᵏ)
-                let extra_bits = bits - (f64::MAX_EXP as u64 - 1);
-                let root_scale = (extra_bits + 1) / 2;
-                let scale = root_scale * 2;
-                (self >> scale).sqrt() << root_scale
-            }
-        };
-
-        #[cfg(not(feature = "std"))]
-        let guess = BigUint::one() << max_bits;
-
-        fixpoint(guess, max_bits, move |s| {
-            let q = self / s;
-            let t = s + q;
-            t >> 1
-        })
-    }
-
-    fn cbrt(&self) -> Self {
-        if self.is_zero() || self.is_one() {
-            return self.clone();
-        }
-
-        // If we fit in `u64`, compute the root that way.
-        if let Some(x) = self.to_u64() {
-            return x.cbrt().into();
-        }
-
-        let bits = self.bits();
-        let max_bits = bits / 3 + 1;
-
-        #[cfg(feature = "std")]
-        let guess = match self.to_f64() {
-            Some(f) if f.is_finite() => {
-                use num_traits::FromPrimitive;
-
-                // We fit in `f64` (lossy), so get a better initial guess from that.
-                BigUint::from_f64(f.cbrt()).unwrap()
-            }
-            _ => {
-                // Try to guess by scaling down such that it does fit in `f64`.
-                // With some (x * 2³ᵏ), its cbrt ≈ (∛x * 2ᵏ)
-                let extra_bits = bits - (f64::MAX_EXP as u64 - 1);
-                let root_scale = (extra_bits + 2) / 3;
-                let scale = root_scale * 3;
-                (self >> scale).cbrt() << root_scale
-            }
-        };
-
-        #[cfg(not(feature = "std"))]
-        let guess = BigUint::one() << max_bits;
-
-        fixpoint(guess, max_bits, move |s| {
-            let q = self / (s * s);
-            let t = (s << 1) + q;
-            t / 3u32
-        })
-    }
-}
-
 /// A generic trait for converting a value to a [`BigUint`].
 pub trait ToBigUint {
     /// Converts the value of `self` to a [`BigUint`].
@@ -524,12 +364,23 @@ pub trait ToBigUint {
 /// The digits are in little-endian base matching `BigDigit`.
 #[inline]
 pub(crate) fn biguint_from_vec(digits: Vec<BigDigit>) -> BigUint {
-    BigUint { data: digits }.normalized()
+    let mut n = BigUint {
+        data: BigDigits::from_vec(digits),
+    };
+    n.normalize();
+    n
 }
 
 impl BigUint {
-    /// A constant `BigUint` with value 0, useful for static initialization.
-    pub const ZERO: Self = BigUint { data: Vec::new() };
+    /// A constant [`BigUint`] with value 0, useful for static initialization.
+    pub const ZERO: Self = BigUint {
+        data: BigDigits::ZERO,
+    };
+
+    /// A constant [`BigUint`] with value 1, useful for static initialization.
+    pub const ONE: Self = BigUint {
+        data: BigDigits::ONE,
+    };
 
     /// Creates and initializes a [`BigUint`].
     ///
@@ -540,13 +391,23 @@ impl BigUint {
 
         cfg_digit_expr!(
             {
-                big.data = digits;
+                big.data = BigDigits::from_vec(digits);
                 big.normalize();
             },
             big.assign_from_slice(&digits)
         );
 
         big
+    }
+
+    /// Creates a constant [`BigUint`] from a primitive [`u32`] value.
+    ///
+    /// Non-`const` callers should use [`From<u32>`] instead.
+    #[inline]
+    pub const fn new_const(n: u32) -> Self {
+        BigUint {
+            data: BigDigits::from_digit(n as BigDigit),
+        }
     }
 
     /// Creates and initializes a [`BigUint`].
@@ -765,7 +626,7 @@ impl BigUint {
     /// ```
     #[inline]
     pub fn iter_u32_digits(&self) -> U32Digits<'_> {
-        U32Digits::new(self.data.as_slice())
+        U32Digits::new(&self.data)
     }
 
     /// Returns an iterator of `u64` digits representation of the [`BigUint`] ordered least
@@ -784,7 +645,7 @@ impl BigUint {
     /// ```
     #[inline]
     pub fn iter_u64_digits(&self) -> U64Digits<'_> {
-        U64Digits::new(self.data.as_slice())
+        U64Digits::new(&self.data)
     }
 
     /// Returns the integer formatted as a string in the given radix.
@@ -848,31 +709,13 @@ impl BigUint {
     /// Determines the fewest bits necessary to express the [`BigUint`].
     #[inline]
     pub fn bits(&self) -> u64 {
-        if self.is_zero() {
-            return 0;
+        match self.data.last() {
+            Some(x) => {
+                let zeros: u64 = x.leading_zeros().into();
+                self.data.len() as u64 * u64::from(big_digit::BITS) - zeros
+            }
+            None => 0,
         }
-        let zeros: u64 = self.data.last().unwrap().leading_zeros().into();
-        self.data.len() as u64 * u64::from(big_digit::BITS) - zeros
-    }
-
-    /// Strips off trailing zero bigdigits - comparisons require the last element in the vector to
-    /// be nonzero.
-    #[inline]
-    fn normalize(&mut self) {
-        if let Some(&0) = self.data.last() {
-            let len = self.data.iter().rposition(|&d| d != 0).map_or(0, |i| i + 1);
-            self.data.truncate(len);
-        }
-        if self.data.len() < self.data.capacity() / 4 {
-            self.data.shrink_to_fit();
-        }
-    }
-
-    /// Returns a normalized [`BigUint`].
-    #[inline]
-    fn normalized(mut self) -> BigUint {
-        self.normalize();
-        self
     }
 
     /// Returns `self ^ exponent`.
@@ -920,7 +763,7 @@ impl BigUint {
             "attempt to calculate with zero modulus!"
         );
         if modulus.is_one() {
-            return Some(Self::zero());
+            return Some(Self::ZERO);
         }
 
         let mut r0; // = modulus.clone();
@@ -940,7 +783,7 @@ impl BigUint {
             }
             r0 = r1;
             r1 = r2;
-            t0 = Self::one();
+            t0 = Self::ONE;
             t1 = modulus - q;
         }
 
@@ -967,39 +810,23 @@ impl BigUint {
         }
     }
 
-    /// Returns the truncated principal square root of `self` --
-    /// see [Roots::sqrt](https://docs.rs/num-integer/0.1/num_integer/trait.Roots.html#method.sqrt)
-    pub fn sqrt(&self) -> Self {
-        Roots::sqrt(self)
-    }
-
-    /// Returns the truncated principal cube root of `self` --
-    /// see [Roots::cbrt](https://docs.rs/num-integer/0.1/num_integer/trait.Roots.html#method.cbrt).
-    pub fn cbrt(&self) -> Self {
-        Roots::cbrt(self)
-    }
-
-    /// Returns the truncated principal `n`th root of `self` --
-    /// see [Roots::nth_root](https://docs.rs/num-integer/0.1/num_integer/trait.Roots.html#tymethod.nth_root).
-    pub fn nth_root(&self, n: u32) -> Self {
-        Roots::nth_root(self, n)
-    }
-
     /// Returns the number of least-significant bits that are zero,
     /// or `None` if the entire number is zero.
     pub fn trailing_zeros(&self) -> Option<u64> {
-        let i = self.data.iter().position(|&digit| digit != 0)?;
-        let zeros: u64 = self.data[i].trailing_zeros().into();
+        let data = &*self.data;
+        let i = data.iter().position(|&digit| digit != 0)?;
+        let zeros: u64 = data[i].trailing_zeros().into();
         Some(i as u64 * u64::from(big_digit::BITS) + zeros)
     }
 
     /// Returns the number of least-significant bits that are ones.
     pub fn trailing_ones(&self) -> u64 {
-        if let Some(i) = self.data.iter().position(|&digit| !digit != 0) {
-            let ones: u64 = self.data[i].trailing_ones().into();
+        let data = &*self.data;
+        if let Some(i) = data.iter().position(|&digit| !digit != 0) {
+            let ones: u64 = data[i].trailing_ones().into();
             i as u64 * u64::from(big_digit::BITS) + ones
         } else {
-            self.data.len() as u64 * u64::from(big_digit::BITS)
+            data.len() as u64 * u64::from(big_digit::BITS)
         }
     }
 
@@ -1013,7 +840,7 @@ impl BigUint {
         let bits_per_digit = u64::from(big_digit::BITS);
         if let Some(digit_index) = (bit / bits_per_digit).to_usize() {
             if let Some(digit) = self.data.get(digit_index) {
-                let bit_mask = (1 as BigDigit) << (bit % bits_per_digit);
+                let bit_mask: BigDigit = 1 << (bit % bits_per_digit);
                 return (digit & bit_mask) != 0;
             }
         }
@@ -1029,17 +856,19 @@ impl BigUint {
         // fail allocation, and that's more consistent than adding our own overflow panics.
         let bits_per_digit = u64::from(big_digit::BITS);
         let digit_index = (bit / bits_per_digit).to_usize().unwrap_or(usize::MAX);
-        let bit_mask = (1 as BigDigit) << (bit % bits_per_digit);
+        let bit_mask: BigDigit = 1 << (bit % bits_per_digit);
         if value {
             if digit_index >= self.data.len() {
                 let new_len = digit_index.saturating_add(1);
                 self.data.resize(new_len, 0);
             }
             self.data[digit_index] |= bit_mask;
-        } else if digit_index < self.data.len() {
-            self.data[digit_index] &= !bit_mask;
-            // the top bit may have been cleared, so normalize
-            self.normalize();
+        } else if let Some(digit) = self.data.get_mut(digit_index) {
+            *digit &= !bit_mask;
+            // if the top digit was cleared, we need to normalize
+            if *digit == 0 && digit_index + 1 == self.data.len() {
+                self.data.normalize();
+            }
         }
     }
 }
@@ -1070,7 +899,7 @@ impl num_traits::ToBytes for BigUint {
 
 pub(crate) trait IntDigits {
     fn digits(&self) -> &[BigDigit];
-    fn digits_mut(&mut self) -> &mut Vec<BigDigit>;
+    fn digits_mut(&mut self) -> &mut BigDigits;
     fn normalize(&mut self);
     fn capacity(&self) -> usize;
     fn len(&self) -> usize;
@@ -1082,12 +911,12 @@ impl IntDigits for BigUint {
         &self.data
     }
     #[inline]
-    fn digits_mut(&mut self) -> &mut Vec<BigDigit> {
+    fn digits_mut(&mut self) -> &mut BigDigits {
         &mut self.data
     }
     #[inline]
     fn normalize(&mut self) {
-        self.normalize();
+        self.data.normalize();
     }
     #[inline]
     fn capacity(&self) -> usize {
@@ -1135,7 +964,7 @@ cfg_digit!(
     #[test]
     fn test_from_slice() {
         fn check(slice: &[u32], data: &[BigDigit]) {
-            assert_eq!(BigUint::from_slice(slice).data, data);
+            assert_eq!(*BigUint::from_slice(slice).data, *data);
         }
         check(&[1], &[1]);
         check(&[0, 0, 0], &[]);
@@ -1149,8 +978,8 @@ cfg_digit!(
     fn test_from_slice() {
         fn check(slice: &[u32], data: &[BigDigit]) {
             assert_eq!(
-                BigUint::from_slice(slice).data,
-                data,
+                *BigUint::from_slice(slice).data,
+                *data,
                 "from {:?}, to {:?}",
                 slice,
                 data

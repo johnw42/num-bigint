@@ -1,9 +1,8 @@
 #![feature(test)]
-#![cfg(feature = "rand")]
 
 extern crate test;
 
-use num_bigint::{BigInt, BigUint, RandBigInt};
+use num_bigint::{BigInt, BigRng010, BigUint};
 use num_traits::{FromPrimitive, Num, One, Zero};
 use std::mem::replace;
 use test::Bencher;
@@ -13,24 +12,24 @@ use rng::get_rng;
 
 fn multiply_bench(b: &mut Bencher, xbits: u64, ybits: u64) {
     let mut rng = get_rng();
-    let x = rng.gen_bigint(xbits);
-    let y = rng.gen_bigint(ybits);
+    let x = rng.random_bigint(xbits);
+    let y = rng.random_bigint(ybits);
 
     b.iter(|| &x * &y);
 }
 
 fn divide_bench(b: &mut Bencher, xbits: u64, ybits: u64) {
     let mut rng = get_rng();
-    let x = rng.gen_bigint(xbits);
-    let y = rng.gen_bigint(ybits);
+    let x = rng.random_bigint(xbits);
+    let y = rng.random_bigint(ybits);
 
     b.iter(|| &x / &y);
 }
 
 fn remainder_bench(b: &mut Bencher, xbits: u64, ybits: u64) {
     let mut rng = get_rng();
-    let x = rng.gen_bigint(xbits);
-    let y = rng.gen_bigint(ybits);
+    let x = rng.random_bigint(xbits);
+    let y = rng.random_bigint(ybits);
 
     b.iter(|| &x % &y);
 }
@@ -67,34 +66,89 @@ fn fib2(n: usize) -> BigUint {
     f0
 }
 
+/// Accumulate a decimal integer 18 digits at a time, the shape of a decimal parser.
+/// `chunks` is chosen so the result brackets the `Inline` -> `Heap` transition.
+fn scalar_accumulate_bench(b: &mut Bencher, chunks: u32) {
+    let m = 10u64.pow(18);
+
+    b.iter(|| {
+        let mut x = BigUint::from(u64::MAX);
+        for _ in 0..chunks {
+            x *= m;
+            x += m - 1;
+        }
+        x
+    });
+}
+
 #[bench]
-fn multiply_0(b: &mut Bencher) {
+fn scalar_accumulate_2_digits(b: &mut Bencher) {
+    scalar_accumulate_bench(b, 1);
+}
+
+#[bench]
+fn scalar_accumulate_3_digits(b: &mut Bencher) {
+    scalar_accumulate_bench(b, 2);
+}
+
+#[bench]
+fn scalar_accumulate_4_digits(b: &mut Bencher) {
+    scalar_accumulate_bench(b, 3);
+}
+
+#[bench]
+fn scalar_accumulate_6_digits(b: &mut Bencher) {
+    scalar_accumulate_bench(b, 5);
+}
+
+#[bench]
+fn scalar_accumulate_20_digits(b: &mut Bencher) {
+    scalar_accumulate_bench(b, 19);
+}
+
+#[bench]
+fn multiply_8_8(b: &mut Bencher) {
     multiply_bench(b, 1 << 8, 1 << 8);
 }
 
 #[bench]
-fn multiply_1(b: &mut Bencher) {
+fn multiply_8_16(b: &mut Bencher) {
     multiply_bench(b, 1 << 8, 1 << 16);
 }
 
 #[bench]
-fn multiply_2(b: &mut Bencher) {
-    multiply_bench(b, 1 << 16, 1 << 16);
-}
-
-#[bench]
-fn multiply_3(b: &mut Bencher) {
-    multiply_bench(b, 1 << 16, 1 << 17);
-}
-
-#[bench]
-fn multiply_4(b: &mut Bencher) {
+fn multiply_12_13(b: &mut Bencher) {
     multiply_bench(b, 1 << 12, 1 << 13);
 }
 
 #[bench]
-fn multiply_5(b: &mut Bencher) {
+fn multiply_12_14(b: &mut Bencher) {
     multiply_bench(b, 1 << 12, 1 << 14);
+}
+
+#[bench]
+fn multiply_13_13(b: &mut Bencher) {
+    multiply_bench(b, 1 << 13, 1 << 13);
+}
+
+#[bench]
+fn multiply_14_14(b: &mut Bencher) {
+    multiply_bench(b, 1 << 14, 1 << 14);
+}
+
+#[bench]
+fn multiply_15_15(b: &mut Bencher) {
+    multiply_bench(b, 1 << 15, 1 << 15);
+}
+
+#[bench]
+fn multiply_16_16(b: &mut Bencher) {
+    multiply_bench(b, 1 << 16, 1 << 16);
+}
+
+#[bench]
+fn multiply_16_17(b: &mut Bencher) {
+    multiply_bench(b, 1 << 16, 1 << 17);
 }
 
 #[bench]
@@ -110,6 +164,11 @@ fn divide_1(b: &mut Bencher) {
 #[bench]
 fn divide_2(b: &mut Bencher) {
     divide_bench(b, 1 << 16, 1 << 12);
+}
+
+#[bench]
+fn divide_3(b: &mut Bencher) {
+    divide_bench(b, 1 << 20, 1 << 16);
 }
 
 #[bench]
@@ -186,7 +245,7 @@ fn fib_to_string(b: &mut Bencher) {
 
 fn to_str_radix_bench(b: &mut Bencher, radix: u32, bits: u64) {
     let mut rng = get_rng();
-    let x = rng.gen_bigint(bits);
+    let x = rng.random_bigint(bits);
     b.iter(|| x.to_str_radix(radix));
 }
 
@@ -211,6 +270,16 @@ fn to_str_radix_10_2(b: &mut Bencher) {
 }
 
 #[bench]
+fn to_str_radix_10_3(b: &mut Bencher) {
+    to_str_radix_bench(b, 10, 100009);
+}
+
+#[bench]
+fn to_str_radix_10_4(b: &mut Bencher) {
+    to_str_radix_bench(b, 10, 1000009);
+}
+
+#[bench]
 fn to_str_radix_16(b: &mut Bencher) {
     to_str_radix_bench(b, 16, 1009);
 }
@@ -222,7 +291,7 @@ fn to_str_radix_36(b: &mut Bencher) {
 
 fn from_str_radix_bench(b: &mut Bencher, radix: u32) {
     let mut rng = get_rng();
-    let x = rng.gen_bigint(1009);
+    let x = rng.random_bigint(1009);
     let s = x.to_str_radix(radix);
     assert_eq!(x, BigInt::from_str_radix(&s, radix).unwrap());
     b.iter(|| BigInt::from_str_radix(&s, radix));
@@ -256,7 +325,7 @@ fn from_str_radix_36(b: &mut Bencher) {
 fn rand_bench(b: &mut Bencher, bits: u64) {
     let mut rng = get_rng();
 
-    b.iter(|| rng.gen_bigint(bits));
+    b.iter(|| rng.random_bigint(bits));
 }
 
 #[bench]
@@ -327,7 +396,7 @@ fn shr(b: &mut Bencher) {
 fn hash(b: &mut Bencher) {
     use std::collections::HashSet;
     let mut rng = get_rng();
-    let v: Vec<BigInt> = (1000..2000).map(|bits| rng.gen_bigint(bits)).collect();
+    let v: Vec<BigInt> = (1000..2000).map(|bits| rng.random_bigint(bits)).collect();
     b.iter(|| {
         let h: HashSet<&BigInt> = v.iter().collect();
         assert_eq!(h.len(), v.len());
@@ -399,8 +468,8 @@ const RFC3526_2048BIT_MODP_GROUP: &str = "\
 #[bench]
 fn modpow(b: &mut Bencher) {
     let mut rng = get_rng();
-    let base = rng.gen_biguint(2048);
-    let e = rng.gen_biguint(2048);
+    let base = rng.random_biguint(2048);
+    let e = rng.random_biguint(2048);
     let m = BigUint::from_str_radix(RFC3526_2048BIT_MODP_GROUP, 16).unwrap();
 
     b.iter(|| base.modpow(&e, &m));
@@ -409,8 +478,8 @@ fn modpow(b: &mut Bencher) {
 #[bench]
 fn modpow_even(b: &mut Bencher) {
     let mut rng = get_rng();
-    let base = rng.gen_biguint(2048);
-    let e = rng.gen_biguint(2048);
+    let base = rng.random_biguint(2048);
+    let e = rng.random_biguint(2048);
     // Make the modulus even, so monty (base-2^32) doesn't apply.
     let m = BigUint::from_str_radix(RFC3526_2048BIT_MODP_GROUP, 16).unwrap() - 1u32;
 
@@ -420,7 +489,7 @@ fn modpow_even(b: &mut Bencher) {
 #[bench]
 fn to_u32_digits(b: &mut Bencher) {
     let mut rng = get_rng();
-    let n = rng.gen_biguint(2048);
+    let n = rng.random_biguint(2048);
 
     b.iter(|| n.to_u32_digits());
 }
@@ -428,7 +497,7 @@ fn to_u32_digits(b: &mut Bencher) {
 #[bench]
 fn iter_u32_digits(b: &mut Bencher) {
     let mut rng = get_rng();
-    let n = rng.gen_biguint(2048);
+    let n = rng.random_biguint(2048);
 
     b.iter(|| n.iter_u32_digits().max());
 }
@@ -436,7 +505,7 @@ fn iter_u32_digits(b: &mut Bencher) {
 #[bench]
 fn to_u64_digits(b: &mut Bencher) {
     let mut rng = get_rng();
-    let n = rng.gen_biguint(2048);
+    let n = rng.random_biguint(2048);
 
     b.iter(|| n.to_u64_digits());
 }
@@ -444,7 +513,7 @@ fn to_u64_digits(b: &mut Bencher) {
 #[bench]
 fn iter_u64_digits(b: &mut Bencher) {
     let mut rng = get_rng();
-    let n = rng.gen_biguint(2048);
+    let n = rng.random_biguint(2048);
 
     b.iter(|| n.iter_u64_digits().max());
 }

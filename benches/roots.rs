@@ -1,9 +1,8 @@
 #![feature(test)]
-#![cfg(feature = "rand")]
 
 extern crate test;
 
-use num_bigint::{BigUint, RandBigInt};
+use num_bigint::{BigRng010, BigUint};
 use test::Bencher;
 
 mod rng;
@@ -37,7 +36,7 @@ fn check(x: &BigUint, n: u32) {
 }
 
 fn bench_sqrt(b: &mut Bencher, bits: u64) {
-    let x = get_rng().gen_biguint(bits);
+    let x = get_rng().random_biguint(bits);
     eprintln!("bench_sqrt({})", x);
 
     check(&x, 2);
@@ -47,6 +46,11 @@ fn bench_sqrt(b: &mut Bencher, bits: u64) {
 #[bench]
 fn big64_sqrt(b: &mut Bencher) {
     bench_sqrt(b, 64);
+}
+
+#[bench]
+fn big128_sqrt(b: &mut Bencher) {
+    bench_sqrt(b, 128);
 }
 
 #[bench]
@@ -64,8 +68,33 @@ fn big4k_sqrt(b: &mut Bencher) {
     bench_sqrt(b, 4096);
 }
 
+#[bench]
+fn big8k_sqrt(b: &mut Bencher) {
+    bench_sqrt(b, 8192);
+}
+
+#[bench]
+fn big15k_sqrt(b: &mut Bencher) {
+    bench_sqrt(b, 15 * 1024 + 1);
+}
+
+#[bench]
+fn big16k_sqrt(b: &mut Bencher) {
+    bench_sqrt(b, 16 * 1024);
+}
+
+#[bench]
+fn big17k_sqrt(b: &mut Bencher) {
+    bench_sqrt(b, 17 * 1024 + 1);
+}
+
+#[bench]
+fn big32k_sqrt(b: &mut Bencher) {
+    bench_sqrt(b, 32 * 1024);
+}
+
 fn bench_cbrt(b: &mut Bencher, bits: u64) {
-    let x = get_rng().gen_biguint(bits);
+    let x = get_rng().random_biguint(bits);
     eprintln!("bench_cbrt({})", x);
 
     check(&x, 3);
@@ -93,7 +122,7 @@ fn big4k_cbrt(b: &mut Bencher) {
 }
 
 fn bench_nth_root(b: &mut Bencher, bits: u64, n: u32) {
-    let x = get_rng().gen_biguint(bits);
+    let x = get_rng().random_biguint(bits);
     eprintln!("bench_{}th_root({})", n, x);
 
     check(&x, n);
