@@ -1,7 +1,10 @@
-#![cfg(any(feature = "quickcheck", feature = "arbitrary"))]
+#![cfg(any(feature = "quickcheck", feature = "arbitrary", feature = "proptest"))]
 
 use super::{BigInt, Sign};
 use crate::BigUint;
+
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
 
 #[cfg(feature = "quickcheck")]
 use alloc::boxed::Box;
@@ -39,5 +42,20 @@ impl arbitrary::Arbitrary<'_> for BigInt {
 
     fn size_hint(depth: usize) -> (usize, Option<usize>) {
         arbitrary::size_hint::and(bool::size_hint(depth), BigUint::size_hint(depth))
+    }
+}
+
+#[cfg(feature = "proptest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "proptest")))]
+impl proptest::arbitrary::Arbitrary for BigInt {
+    type Parameters = ();
+    type Strategy = BoxedStrategy<Self>;
+
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+        let sign_strategy = prop_oneof![Just(Sign::Plus), Just(Sign::Minus)];
+        (sign_strategy, any::<BigUint>())
+            .prop_map(|(sign, data)| BigInt::from_biguint(sign, data))
+            .boxed()
     }
 }

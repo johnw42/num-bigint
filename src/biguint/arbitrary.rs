@@ -1,4 +1,4 @@
-#![cfg(any(feature = "quickcheck", feature = "arbitrary"))]
+#![cfg(any(feature = "quickcheck", feature = "arbitrary", feature = "proptest"))]
 
 use super::{biguint_from_vec, BigUint};
 
@@ -6,6 +6,9 @@ use crate::big_digit::BigDigit;
 #[cfg(feature = "quickcheck")]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+
+#[cfg(feature = "proptest")]
+use proptest::prelude::*;
 
 #[cfg(feature = "quickcheck")]
 #[cfg_attr(docsrs, doc(cfg(feature = "quickcheck")))]
@@ -34,5 +37,18 @@ impl arbitrary::Arbitrary<'_> for BigUint {
 
     fn size_hint(depth: usize) -> (usize, Option<usize>) {
         Vec::<BigDigit>::size_hint(depth)
+    }
+}
+
+#[cfg(feature = "proptest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "proptest")))]
+impl proptest::arbitrary::Arbitrary for BigUint {
+    type Parameters = ();
+    type Strategy = BoxedStrategy<Self>;
+
+    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+        use proptest::prelude::*;
+        let bigint_strategy = any::<Vec<BigDigit>>().prop_map(biguint_from_vec);
+        bigint_strategy.boxed()
     }
 }
