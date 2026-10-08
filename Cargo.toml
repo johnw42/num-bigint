@@ -119,4 +119,3 @@ default-features = false
 [dependencies.proptest]
 optional = true
 version = "1"
-default-features = false

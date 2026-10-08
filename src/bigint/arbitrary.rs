@@ -3,9 +3,6 @@
 use super::{BigInt, Sign};
 use crate::BigUint;
 
-#[cfg(feature = "proptest")]
-use proptest::prelude::*;
-
 #[cfg(feature = "quickcheck")]
 use alloc::boxed::Box;
 
@@ -49,7 +46,7 @@ impl arbitrary::Arbitrary<'_> for BigInt {
 #[cfg_attr(docsrs, doc(cfg(feature = "proptest")))]
 impl proptest::arbitrary::Arbitrary for BigInt {
     type Parameters = ();
-    type Strategy = BoxedStrategy<Self>;
+    type Strategy = proptest::strategy::BoxedStrategy<Self>;
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         use proptest::prelude::*;
@@ -57,5 +54,35 @@ impl proptest::arbitrary::Arbitrary for BigInt {
         (sign_strategy, any::<BigUint>())
             .prop_map(|(sign, data)| BigInt::from_biguint(sign, data))
             .boxed()
+    }
+}
+
+// These are just smoke tests for the arbitrary implementations to ensure they can be called.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "quickcheck")]
+    #[test]
+    fn test_quickcheck_arbitrary() {
+        let mut gen = quickcheck::Gen::new(10);
+        let bigint = <BigInt as quickcheck::Arbitrary>::arbitrary(&mut gen);
+        assert_eq!(bigint, bigint);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn test_arbitrary_arbitrary() {
+        let mut u = arbitrary::Unstructured::new(&[1, 2, 3]);
+        let bigint = <BigInt as arbitrary::Arbitrary>::arbitrary(&mut u);
+        assert_eq!(bigint, bigint);
+    }
+
+    #[cfg(feature = "proptest")]
+    proptest::proptest! {
+        #[test]
+        fn test_proptest_arbitrary(bigint: BigInt) {
+            proptest::prop_assert_eq!(&bigint, &bigint);
+        }
     }
 }
